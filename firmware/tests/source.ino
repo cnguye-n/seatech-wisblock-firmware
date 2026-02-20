@@ -25,6 +25,8 @@
 #include <Wire.h> //need this to turn on MCU's I2C controller or GNSS won't initialize
 #include <SparkFun_u-blox_GNSS_Arduino_Library.h>
 
+struct GnssSnapshot;
+GnssSnapshot getGnssSnapshot();
 
 SFE_UBLOX_GNSS myGNSS;
 
@@ -34,16 +36,34 @@ SFE_UBLOX_GNSS myGNSS;
 
 //cycle settings
 #define LOG_INTERVAL_MS        60000UL   // 1 minute in milliseconds 
-#define GNSS_ATTEMPT_MS         10000UL   // 10 seconds in milliseconds
+#define GNSS_ATTEMPT_MS         15000UL  // 30 seconds in milliseconds
 
-#define MIN_SIV_FOR_VALID           4     // require at least 4 satellites in view for real fix
+#define MIN_SIV_FOR_VALID           3     // require at least 3 or 4 satellites in view for real fix
 #define CSV_PATH            "track.csv"   // IMPORTANT: no leading "/"
 #define SD_RETRY_MS            30000UL    // retry SD every 30s if it fails
+
+//#define DEBUG true //for debugging purposes
 
 // ====== STATE ======
 bool sdOK = false;
 unsigned long lastLog = 0;
 unsigned long lastSDRetry = 0;
+
+//for GNSS - will be used in setup() to make sure to not call GNSS functions unless GNSS is initialized
+bool gnssOK = false;
+unsigned long lastGNSSRetry = 0;
+#define GNSS_RETRY_MS 30000UL
+
+void enableWisBlockSensorRails() {
+  // Turn on possible WisBlock sensor power rails (safe for testing)
+  pinMode(WB_IO1, OUTPUT); digitalWrite(WB_IO1, HIGH);
+  pinMode(WB_IO2, OUTPUT); digitalWrite(WB_IO2, HIGH);
+  pinMode(WB_IO3, OUTPUT); digitalWrite(WB_IO3, HIGH);
+  pinMode(WB_IO4, OUTPUT); digitalWrite(WB_IO4, HIGH);
+  pinMode(WB_IO5, OUTPUT); digitalWrite(WB_IO5, HIGH);
+  pinMode(WB_IO6, OUTPUT); digitalWrite(WB_IO6, HIGH);
+  delay(300);
+}
 
 // ===================== GNSS SNAPSHOT TYPE =====================
 struct GnssSnapshot {
@@ -84,7 +104,7 @@ void tryInitSD() {
   delay(300);
 
   if (!SD.begin()) {
-    Serial.println("SD mount failed (FAT32? module seated? card inserted?)");
+    Serial.println("SD mount failed (FAT32? module seated? card inserted?????)");
     sdOK = false;
     return;
   }
@@ -109,42 +129,64 @@ void tryInitSD() {
 bool initGNSS() {
 #if USE_GNSS
   Serial.println("Init GNSS...");
-  Wire.begin(); //turns on MCU's i2C controller (SDA/Data, SCL/Clock) --> send to RAK12500 GNSS Module
-  //InterIntegrated Circuit communication for chips on same board 
+  delay(3000); //give GNSS time to boot (wire already running)
 
-  delay(500); // give GNSS time to boot
-
-  if (!myGNSS.begin(Wire, 0x42)) {
-    Serial.println("❌ GNSS not detected at I2C addr 0x42");
-    return false;
+  bool ok = false;
+  for (int i = 0; i < 10; i++) {
+    if (myGNSS.begin(Wire, 0x42)) {
+      ok = true;
+      break;
+    }
+    delay(250);
   }
+
+   if (!ok) {
+    Serial.println("❌ GNSS not detected at I2C addr 0x42");
+    Wire.beginTransmission(0x42);
+    uint8_t err = Wire.endTransmission();
+    Serial.print("I2C probe 0x42 err=");
+    Serial.println(err); // 0 = ACK
+    return false;
+    }
+
   Serial.println("✅ GNSS detected at 0x42");
 
+  //CONFIGURE MODULE
   myGNSS.setI2COutput(COM_TYPE_UBX);
-
   //FIX: enable automatic PVT so library fetches fresh solutions --> helps avoid stale values
   myGNSS.setAutoPVT(true);
-  // Put GNSS into u-blox power save between attempts (should be supported by library version)
-  myGNSS.powerSaveMode(true);
+  myGNSS.powerSaveMode(false); //stay awake after init so we only call sleepGNSS after we logged
 
-  Serial.println("✅ GNSS ready (AutoPVT on + power save enabled)");
+  Serial.println("✅ GNSS ready (AutoPVT on; staying awake after init)");
   return true;
+
 #else
   return true;
 #endif
-}
+} //end of function
 
 // -------- GNSS power wrappers --------
 void wakeGNSS() {
 #if USE_GNSS
+  if (!gnssOK) return;
+
+  Serial.println("🔆 GNSS WAKE");
   myGNSS.powerSaveMode(false);  // disable GNSS power save
-  delay(100);
+  delay(200); //give time to wake
+
+  //added code, if there is 1, power save enabled, 0 means full power, 255 means command failed/no response
+  uint8_t psm = myGNSS.getPowerSaveMode();
+  Serial.print("PSM state = ");
+  Serial.println(psm);
 #endif
-}
+} //end of function
 
 void sleepGNSS() {
 #if USE_GNSS
+  if (!gnssOK) return;
+  Serial.println("🌙 GNSS SLEEP");
   myGNSS.powerSaveMode(true);   // enable GNSS power save
+  delay(50);
 #endif
 }
 
@@ -160,7 +202,9 @@ GnssSnapshot getGnssSnapshot() {
   snapshot.lon = 0;
   snapshot.surfaceFix = false;
 
+
 #if USE_GNSS
+  if (!gnssOK) return snapshot; 
   wakeGNSS();
 
   unsigned long start = millis();
@@ -205,36 +249,53 @@ GnssSnapshot getGnssSnapshot() {
 //===================== SETUP (runs once) =====================
 void setup() {
   unsigned long timeout = millis();
-  //115200 is a fast serial speed and common default. MAKE SURE 115200 IS IN THE SERIAL MONITOR 
-  Serial.begin(115200); //115200 is the baud rate 
+  Serial.begin(115200); //115200 is the baud rate --> 115200 is a fast serial speed and common default. MAKE SURE 115200 IS IN THE SERIAL MONITOR 
   while (!Serial) {
     if ((millis() - timeout) < 5000) delay(100);
     else break;
   }
 
   Serial.println("\n ✅ Firmware starting: Battery + GNSS + SD logger");
+  enableWisBlockSensorRails(); //turn on the bus
 
+  //A. I2C init 
+  Wire.begin();
+  Wire.setClock(100000);   // safe I2C speed
+  delay(50);
+
+  //B. Initiatize DF
   tryInitSD();
 
+  //C. Initialize GNSS 
 #if USE_GNSS
-  if (!initGNSS()) {
+  gnssOK = initGNSS();
+  if (!gnssOK) {
     Serial.println("⚠️ GNSS init failed (will log battery + no-fix)");
   }
 #endif
 
   lastLog = millis();
   lastSDRetry = millis();
+  lastGNSSRetry = millis();
 } //end of void setup
 
 
 // ===================== LOOP (runs forever) =====================
 void loop() {
-  // retry SD sometimes if it failed (when sdOK ==false) so we try to remount
-  // --> can reseat Sd card and recover without rebooting
+  // A. retry SD sometimes if it failed (when sdOK ==false) so we try to remount
   if (!sdOK && (millis() - lastSDRetry >= SD_RETRY_MS)) {
     lastSDRetry = millis();
     tryInitSD();
   }
+
+  //B. Retry GNSS if init failed
+  #if USE_GNSS
+  if (!gnssOK && (millis() - lastGNSSRetry >= GNSS_RETRY_MS)) {
+    lastGNSSRetry = millis();
+    Serial.println("🔁 Retrying GNSS init...");
+    gnssOK = initGNSS();
+  }
+#endif
 
   //MAIN SCHEDULER
   // main duty-cycle trigger, logs every interval
@@ -310,4 +371,3 @@ void loop() {
   delay(50); //later can do 1000, keeps loop from spinning too much, does NOT sleep MCU "deeply"
   //it is still awake (deep sleep is a separate process)
  } //end of void loop
-
