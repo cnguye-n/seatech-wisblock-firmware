@@ -9,11 +9,19 @@
   - CSV on SD: track.csv
   - 10-minute duty cycle
   - Each cycle: wake GNSS -> attempt fix for up to 90s -> log -> GNSS power save
+
+
+  Goal (test-mode):
+  - Every 1 minute: wake GNSS, try for up to 10 seconds, log result
+  - If no valid fix -> leave lat/lon blank (Serial + CSV)
+  - Put GNSS into power-save between attempts
+
+
 **************************************************************/
-#include "GnssTypes.h"
+//#include "GnssTypes.h"
 #include <Adafruit_TinyUSB.h>  // keeps Serial stable on many nRF52 cores
 #include <SPI.h> //Serial Peripheral Interface, fast data transfer between microcontroller and peripheral so need this for SD Card!
-#include <SD.h> //using Arduino built in
+#include <SD.h> //using Arduino built in library
 #include <Wire.h> //need this to turn on MCU's I2C controller or GNSS won't initialize
 #include <SparkFun_u-blox_GNSS_Arduino_Library.h>
 
@@ -28,7 +36,7 @@ SFE_UBLOX_GNSS myGNSS;
 #define LOG_INTERVAL_MS        60000UL   // 1 minute in milliseconds 
 #define GNSS_ATTEMPT_MS         10000UL   // 10 seconds in milliseconds
 
-#define MIN_SIV_FOR_VALID           4     // require at least 4 satellites in view
+#define MIN_SIV_FOR_VALID           4     // require at least 4 satellites in view for real fix
 #define CSV_PATH            "track.csv"   // IMPORTANT: no leading "/"
 #define SD_RETRY_MS            30000UL    // retry SD every 30s if it fails
 
@@ -37,10 +45,19 @@ bool sdOK = false;
 unsigned long lastLog = 0;
 unsigned long lastSDRetry = 0;
 
+// ===================== GNSS SNAPSHOT TYPE =====================
+struct GnssSnapshot {
+  int fixType;      //u-block fixType (0..5 is typical value)
+  int siv;          //satellites in view
+  long lat   ;      //degrees * 1e-7 (SparkFun library format)
+  long lon;         // degrees * 1e-7
+  bool surfaceFix;  //true only if we have valid fix during attempt window
+};
+
 // ===================== BATTERY =====================
 float readBatteryV() {
   int raw = analogRead(WB_A0);
-  return raw * (3.6f / 1023.0f) * 2.0f; // the tested scale
+  return raw * (3.6f / 1023.0f) * 2.0f; // confirmed/tested scaling
 }
 
 int batteryPercentFromVoltage(float v) {
@@ -76,10 +93,10 @@ void tryInitSD() {
   sdOK = true;
 
   if (!SD.exists(CSV_PATH)) {
-    File f = SD.open(CSV_PATH, FILE_WRITE);
-    if (f) {
-      f.println("uptime_min,batt_v,batt_pct,fixType,siv,lat_1e7,lon_1e7,surfaceFix");
-      f.close();
+    File file = SD.open(CSV_PATH, FILE_WRITE);
+    if (file) {
+      file.println("uptime_min, batt_v, batt_pct, fixType, siv, lat_1e7, lon_1e7, surfaceFix");
+      file.close();
       Serial.println("✅ Created track.csv with header");
     } else {
       Serial.println("❌ Could not create track.csv");
@@ -95,17 +112,22 @@ bool initGNSS() {
   Wire.begin(); //turns on MCU's i2C controller (SDA/Data, SCL/Clock) --> send to RAK12500 GNSS Module
   //InterIntegrated Circuit communication for chips on same board 
 
-  if (!myGNSS.begin(Wire)) { //myGNSS.begin(Wire) tells GNSS library to use I2C bus to talk to GNSS chip
-    Serial.println("❌ GNSS not detected on I2C");
+  delay(500); // give GNSS time to boot
+
+  if (!myGNSS.begin(Wire, 0x42)) {
+    Serial.println("❌ GNSS not detected at I2C addr 0x42");
     return false;
   }
+  Serial.println("✅ GNSS detected at 0x42");
 
   myGNSS.setI2COutput(COM_TYPE_UBX);
 
+  //FIX: enable automatic PVT so library fetches fresh solutions --> helps avoid stale values
+  myGNSS.setAutoPVT(true);
   // Put GNSS into u-blox power save between attempts (should be supported by library version)
   myGNSS.powerSaveMode(true);
 
-  Serial.println("✅ GNSS ready (power save enabled)");
+  Serial.println("✅ GNSS ready (AutoPVT on + power save enabled)");
   return true;
 #else
   return true;
@@ -126,13 +148,16 @@ void sleepGNSS() {
 #endif
 }
 
-// -------- Attempt GNSS fix for up to 90s --------
-//GnssSnapshot defined in GnssTypes.h
+// ===================== GNSS ATTEMPT WINDOW =====================
+// This function ONLY sets lat/lon if we get a valid fix DURING the window.
+// If we do not, lat/lon remain 0 and we print/write blanks.
+// -------- Attempt GNSS fix for up to 90s or whatever value we chose --------
 GnssSnapshot getGnssSnapshot() {
   GnssSnapshot snapshot;
   snapshot.fixType = -1; 
   snapshot.siv = -1;
-  snapshot.lat = snapshot.lon = 0;
+  snapshot.lat = 0;
+  snapshot.lon = 0;
   snapshot.surfaceFix = false;
 
 #if USE_GNSS
@@ -142,21 +167,27 @@ GnssSnapshot getGnssSnapshot() {
 
   //while statement means try to get a fix for up to 10 seconds
   while (millis() - start < GNSS_ATTEMPT_MS) {
-    int fix = (int)myGNSS.getFixType(); 
-    int siv = (int)myGNSS.getSIV();
 
-    snapshot.fixType = fix;
-    snapshot.siv = siv;
+    //Force library to pull/update the latest PVT data
+    //if return false, we didn't get fresh update yet
+    bool fresh = myGNSS.getPVT();
 
-    // accept if we have fix + enough satellites
-    //if gnss gets a valid fix early, we break out of the loop so like from 2 seconds 
-    if (fix >= 2 && siv >= MIN_SIV_FOR_VALID) {
-      snapshot.lat = myGNSS.getLatitude();
-      snapshot.lon = myGNSS.getLongitude();
-      snapshot.surfaceFix = true;
-      break;
+    if (fresh){
+      int fix = (int)myGNSS.getFixType(); 
+      int siv = (int)myGNSS.getSIV();
+
+      snapshot.fixType = fix;
+      snapshot.siv = siv;
+
+      // accept if we have fix + enough satellites
+      //if gnss gets a valid fix early, we break out of the loop so like from 2 seconds 
+      if (fix >= 2 && siv >= MIN_SIV_FOR_VALID) {
+        snapshot.lat = myGNSS.getLatitude();
+        snapshot.lon = myGNSS.getLongitude();
+        snapshot.surfaceFix = true;
+        break;
+      }
     }
-
     delay(250); //originally did delay 1000 but changed to 250 to poll faster inside the 10s window
   } //end of while loop
 
@@ -174,7 +205,8 @@ GnssSnapshot getGnssSnapshot() {
 //===================== SETUP (runs once) =====================
 void setup() {
   unsigned long timeout = millis();
-  Serial.begin(115200);
+  //115200 is a fast serial speed and common default. MAKE SURE 115200 IS IN THE SERIAL MONITOR 
+  Serial.begin(115200); //115200 is the baud rate 
   while (!Serial) {
     if ((millis() - timeout) < 5000) delay(100);
     else break;
@@ -216,7 +248,7 @@ void loop() {
 
     GnssSnapshot gSnapshot = getGnssSnapshot();
 
-    // serial print (once per cycle)
+    // serial print (once per cycle) --> NO LAT/LON UNLESS SURFACEFIX IS TRUE
     Serial.print("LOG t=");
     Serial.print(uptimeMin, 2);
     Serial.print(" min batt=");
@@ -230,6 +262,7 @@ void loop() {
     Serial.print(gSnapshot.fixType);
     Serial.print(" siv=");
     Serial.print(gSnapshot.siv);
+
     if (gSnapshot.surfaceFix) {
       Serial.print(" lat=");
       Serial.print(gSnapshot.lat);
@@ -241,7 +274,7 @@ void loop() {
 #endif
     Serial.println();
 
-    // write to SD
+    // -------- SD logging (blank lat/lon if no surfaceFix) --------
     if (sdOK) {
       File file = SD.open(CSV_PATH, FILE_WRITE); //writes one CSV row per cycle
       if (file) {
