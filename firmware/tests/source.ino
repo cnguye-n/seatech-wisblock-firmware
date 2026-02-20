@@ -12,13 +12,11 @@
 
 
   Goal (test-mode):
-  - Every 1 minute: wake GNSS, try for up to 10 seconds, log result
+  - Every 1 minute: wake GNSS, try for up to 15 seconds, log result, gnss go back to sleep
   - If no valid fix -> leave lat/lon blank (Serial + CSV)
   - Put GNSS into power-save between attempts
 
-
 **************************************************************/
-//#include "GnssTypes.h"
 #include <Adafruit_TinyUSB.h>  // keeps Serial stable on many nRF52 cores
 #include <SPI.h> //Serial Peripheral Interface, fast data transfer between microcontroller and peripheral so need this for SD Card!
 #include <SD.h> //using Arduino built in library
@@ -76,8 +74,11 @@ struct GnssSnapshot {
 
 // ===================== BATTERY =====================
 float readBatteryV() {
-  int raw = analogRead(WB_A0);
-  return raw * (3.6f / 1023.0f) * 2.0f; // confirmed/tested scaling
+  const float VBAT_MV_PER_LSB = 3000.0f / 4096.0f; // 12-bit, 3.0V ref
+  const float VBAT_DIVIDER_COMP = 1.73f;           // RAK divider factor, can play with this number
+  float raw = analogRead(WB_A0);                   // 0..4095
+  float mv = raw * VBAT_MV_PER_LSB * VBAT_DIVIDER_COMP;
+  return mv / 1000.0f;                             // volts
 }
 
 int batteryPercentFromVoltage(float v) {
@@ -174,7 +175,7 @@ void wakeGNSS() {
   myGNSS.powerSaveMode(false);  // disable GNSS power save
   delay(200); //give time to wake
 
-  //added code, if there is 1, power save enabled, 0 means full power, 255 means command failed/no response
+  //added debug code, if there is 1, power save enabled, 0 means full power, 255 means command failed/no response
   uint8_t psm = myGNSS.getPowerSaveMode();
   Serial.print("PSM state = ");
   Serial.println(psm);
@@ -248,6 +249,7 @@ GnssSnapshot getGnssSnapshot() {
 //Basically two main parts of of code you have to do void setup () and then void loop()
 //===================== SETUP (runs once) =====================
 void setup() {
+
   unsigned long timeout = millis();
   Serial.begin(115200); //115200 is the baud rate --> 115200 is a fast serial speed and common default. MAKE SURE 115200 IS IN THE SERIAL MONITOR 
   while (!Serial) {
@@ -257,6 +259,12 @@ void setup() {
 
   Serial.println("\n ✅ Firmware starting: Battery + GNSS + SD logger");
   enableWisBlockSensorRails(); //turn on the bus
+
+  //for reading battery voltage-using rakwireless code approach
+  analogReference(AR_INTERNAL_3_0);
+  analogReadResolution(12);
+  delay(2);
+  analogRead(WB_A0); //throw away first sample 
 
   //A. I2C init 
   Wire.begin();
