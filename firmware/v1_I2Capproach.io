@@ -1,3 +1,4 @@
+//VERSION 1 ---> DEPRECATED --> DON"T USE ANYMORE -- we use UART approach
 /**************************************************************
   1. RAKwireless WIsBlock Meshtastic Starter Kit US915 SKU 116016 
       --> has WisBlock Base (RAK 19007)
@@ -52,6 +53,8 @@ bool gnssOK = false;
 unsigned long lastGNSSRetry = 0;
 #define GNSS_RETRY_MS 30000UL
 
+//if you didn't have this function somehow the GNSS isn't detected
+//don't have to turn them all on, I think ours is only WB_IO1 so later I create code for that
 void enableWisBlockSensorRails() {
   // Turn on possible WisBlock sensor power rails (safe for testing)
   pinMode(WB_IO1, OUTPUT); digitalWrite(WB_IO1, HIGH);
