@@ -1,4 +1,5 @@
 //successfully creates folders, full wake cycle
+//CURRENT DEMO CODE FOR NO SLEEP TESTING BC SHORT CYCLE
 /**************************************************************
   1. RAKwireless WIsBlock Meshtastic Starter Kit US915 SKU 116016 
       --> has WisBlock Base (RAK 19007)
@@ -46,32 +47,31 @@ SFE_UBLOX_GNSS myGNSS;
 
 //cycle settings
 #define LOG_INTERVAL_MS 60000UL//300000UL  // how long the cycle will be 5 - minutes in milliseconds
-#define GNSS_ATTEMPT_MS 60000UL   //NEW: 60s for testing; set back to 15000UL later
+#define GNSS_ATTEMPT_MS 60000UL   //60s for testing; set back to 15000UL later
 
 #define MIN_SIV_FOR_VALID 3   // Minimum Sattelites in View threshold: require at least 3 or 4 satellites in view for real fix
 #define SD_RETRY_MS 30000UL   // retry SD every 30s if it fails
 
-//NEW: if GNSS attempt window takes almost the whole interval, avoid "back-to-back" cycles
+//if GNSS attempt window takes almost the whole interval, avoid "back-to-back" cycles
 //0 = keep your original stable cadence behavior (lastLog += interval)
 //1 = schedule next run from NOW (no catch-up)
-#define SCHED_FROM_NOW 1 //NEW
+#define SCHED_FROM_NOW 1 
+//UART GNSS settings (matches RAK official approach)
+#define USE_GNSS_UART 1 // 1 = UART (Serial1)
+#define GNSS_UART_BAUD_DEFAULT 9600 // fallback if we don't want scan
+#define GNSS_UART_SCAN_BAUDS 1 
 
-//NEW: UART GNSS settings (matches RAK official approach)
-#define USE_GNSS_UART 1 //NEW: 1 = UART (Serial1). 0 = (your old I2C approach - not used here)
-#define GNSS_UART_BAUD_DEFAULT 9600 //NEW: fallback if you don't want scan
-#define GNSS_UART_SCAN_BAUDS 1 //NEW: do the RAK-style baud scan at boot
-
-//NEW: power reset GNSS rail at boot like RAK official code
+//power reset GNSS rail at boot like RAK official code
 #define GNSS_POWER_RESET_AT_BOOT 1 //NEW
 
-//NEW: test-mode option: keep GNSS awake between cycles (warm start)
+// test-mode option: keep GNSS awake between cycles (warm start)
 //Set to 0 later for power saving
-#define GNSS_KEEP_AWAKE_BETWEEN_CYCLES 1 //NEW
+#define GNSS_KEEP_AWAKE_BETWEEN_CYCLES 1 
 
 // ====== RUN FOLDER PATHS ======
-char g_runDir[16] = {0};     //NEW: "RUN001"
-char g_csvPath[32] = {0};    //NEW: "RUN001/track.csv"
-char g_infoPath[32] = {0};   //NEW: "RUN001/info.txt"
+char g_runDir[16] = {0};     //ex: "RUN001"
+char g_csvPath[32] = {0};    //ex: "RUN001/track.csv"
+char g_infoPath[32] = {0};   //ex: "RUN001/info.txt"
 
 // ====== STATE ======
 bool sdOK = false;              //if SD currently mounted and stable
@@ -83,13 +83,13 @@ bool gnssOK = false;              //tracks if GNSS initialized successfully
 unsigned long lastGNSSRetry = 0;  //last time we retried GNSS init
 #define GNSS_RETRY_MS 30000UL     //retry GNSS init every x seconds if it failed
 
-bool runFolderCreated = false;    //NEW: only create RUN### once per boot (prevents RUN001 header-only + RUN002 data issue)
+bool runFolderCreated = false;    //only create RUN### once per boot (prevents RUN001 header-only + RUN002 data issue)
 
 //NEW: measure "GNSS awake" time (from wake command to sleep command)
-unsigned long g_lastGnssAwakeMs = 0; //NEW
+unsigned long g_lastGnssAwakeMs = 0; 
 
 void enableWisBlockSensorRails() {
-  // Turn on possible WisBlock sensor power rails (safe for testing)
+  // Turn on possible WisBlock sensor power rails (safe for testing) --> later optimize by only enabling rails we need
   //on Wisblock bases, the IO rails (WB_I01, etc. ) can control/enable sensor power lines
   pinMode(WB_IO1, OUTPUT);
   digitalWrite(WB_IO1, HIGH);
@@ -107,49 +107,48 @@ void enableWisBlockSensorRails() {
   delay(300);  //give hardware time to stabalize after rails come up
 }
 
-//NEW: create next available run folder RUN001, RUN002, ...
-bool createNextRunFolder() { //NEW
-  for (int i = 1; i <= 999; i++) { //NEW
-    snprintf(g_runDir, sizeof(g_runDir), "RUN%03d", i); //NEW
-    if (!SD.exists(g_runDir)) { //NEW
-      if (!SD.mkdir(g_runDir)) { //NEW
-        Serial.println("❌ Could not create run folder"); //NEW
-        return false; //NEW
+//create next available run folder RUN001, RUN002, ...
+bool createNextRunFolder() { 
+  for (int i = 1; i <= 999; i++) { 
+    snprintf(g_runDir, sizeof(g_runDir), "RUN%03d", i); 
+    if (!SD.exists(g_runDir)) { 
+      if (!SD.mkdir(g_runDir)) { 
+        Serial.println("❌ Could not create run folder"); 
+        return false;
       }
-      snprintf(g_csvPath, sizeof(g_csvPath), "%s/track.csv", g_runDir); //NEW
-      snprintf(g_infoPath, sizeof(g_infoPath), "%s/info.txt", g_runDir); //NEW
-      Serial.print("✅ Created run folder: "); //NEW
-      Serial.println(g_runDir); //NEW
-      return true; //NEW
+      snprintf(g_csvPath, sizeof(g_csvPath), "%s/track.csv", g_runDir); 
+      snprintf(g_infoPath, sizeof(g_infoPath), "%s/info.txt", g_runDir);
+      Serial.print("✅ Created run folder: "); 
+      Serial.println(g_runDir); 
+      return true; 
     }
   }
-  Serial.println("❌ No available RUN### folder slots"); //NEW
-  return false; //NEW
+  Serial.println("❌ No available RUN### folder slots"); 
+  return false;
 }
 
-//NEW: write info.txt once per run (at boot)
-void writeRunInfoFile() { //NEW
-  File f = SD.open(g_infoPath, FILE_WRITE); //NEW
-  if (!f) { //NEW
-    Serial.println("❌ Could not write info.txt"); //NEW
-    return; //NEW
+//write info.txt once per run (at boot)
+void writeRunInfoFile() { 
+  File f = SD.open(g_infoPath, FILE_WRITE); 
+  if (!f) { 
+    Serial.println("❌ Could not write info.txt");
+    return; 
   }
 
-  f.println("SEAtech GNSS Logger Run Info"); //NEW
-  f.print("Build: "); f.print(__DATE__); f.print(" "); f.println(__TIME__); //NEW
+  f.println("SEAtech GNSS Logger Run Info"); 
+  f.print("Build: "); f.print(__DATE__); f.print(" "); f.println(__TIME__); 
+  f.print("LOG_INTERVAL_MS="); f.println(LOG_INTERVAL_MS); 
+  f.print("GNSS_ATTEMPT_MS="); f.println(GNSS_ATTEMPT_MS); 
+  f.print("MIN_SIV_FOR_VALID="); f.println(MIN_SIV_FOR_VALID); 
 
-  f.print("LOG_INTERVAL_MS="); f.println(LOG_INTERVAL_MS); //NEW
-  f.print("GNSS_ATTEMPT_MS="); f.println(GNSS_ATTEMPT_MS); //NEW
-  f.print("MIN_SIV_FOR_VALID="); f.println(MIN_SIV_FOR_VALID); //NEW
+  f.print("SCHED_FROM_NOW="); f.println(SCHED_FROM_NOW); 
+  f.print("USE_GNSS_UART="); f.println(USE_GNSS_UART); 
+  f.print("GNSS_UART_SCAN_BAUDS="); f.println(GNSS_UART_SCAN_BAUDS);
+  f.print("GNSS_POWER_RESET_AT_BOOT="); f.println(GNSS_POWER_RESET_AT_BOOT); 
+  f.print("GNSS_KEEP_AWAKE_BETWEEN_CYCLES="); f.println(GNSS_KEEP_AWAKE_BETWEEN_CYCLES); 
 
-  f.print("SCHED_FROM_NOW="); f.println(SCHED_FROM_NOW); //NEW
-  f.print("USE_GNSS_UART="); f.println(USE_GNSS_UART); //NEW
-  f.print("GNSS_UART_SCAN_BAUDS="); f.println(GNSS_UART_SCAN_BAUDS); //NEW
-  f.print("GNSS_POWER_RESET_AT_BOOT="); f.println(GNSS_POWER_RESET_AT_BOOT); //NEW
-  f.print("GNSS_KEEP_AWAKE_BETWEEN_CYCLES="); f.println(GNSS_KEEP_AWAKE_BETWEEN_CYCLES); //NEW
-
-  f.close(); //NEW
-  Serial.println("✅ Wrote info.txt"); //NEW
+  f.close(); 
+  Serial.println("✅ Wrote info.txt"); 
 }
 
 // ===================== GNSS SNAPSHOT TYPE =====================
@@ -158,9 +157,9 @@ struct GnssSnapshot {
   int siv;          //satellites in view
   long lat;         //degrees * 1e-7 (SparkFun library format)
   long lon;         //degrees * 1e-7
-  long altMm;       //NEW: altitude in millimeters
-  uint32_t hAccMm;  //NEW: horizontal accuracy estimate in millimeters
-  long speedMmps;   //NEW: ground speed in millimeters per second
+  long altMm;       //altitude in millimeters
+  uint32_t hAccMm;  //horizontal accuracy estimate in millimeters
+  long speedMmps;   //ground speed in millimeters per second
   bool surfaceFix;  //true only if we got a valid fix during attempt window
 
   //GNSS UTC timespace (valid when timeValid==true) bc can only get timestamp from GNSS
@@ -227,23 +226,23 @@ void tryInitSD() {
   Serial.println("✅ SD mounted");
   sdOK = true;
 
-  //NEW: create per-run folder + write info.txt ONLY ONCE per boot
-  if (!runFolderCreated) { //NEW
-    if (!createNextRunFolder()) { //NEW
-      sdOK = false;               //NEW
-      return;                     //NEW
+  //per-run folder + write info.txt ONLY ONCE per boot
+  if (!runFolderCreated) { 
+    if (!createNextRunFolder()) { 
+      sdOK = false;              
+      return;                     
     }
-    writeRunInfoFile(); //NEW
-    runFolderCreated = true; //NEW
-  } //NEW
+    writeRunInfoFile(); 
+    runFolderCreated = true; 
+  } 
 
-  //NEW: creates track.csv inside run folder and writes header
-  if (!SD.exists(g_csvPath)) { //NEW
-    File file = SD.open(g_csvPath, FILE_WRITE); //NEW
+  //creates track.csv inside run folder and writes header
+  if (!SD.exists(g_csvPath)) { 
+    File file = SD.open(g_csvPath, FILE_WRITE); 
     if (file) {
       file.println("utc_iso,latitude,longitude,altitude_m,hAcc_m,speed_mps,surfaceFix,fixType,siv,uptime_min,batt_v,batt_pct");
       file.close();
-      delay(50); //NEW: let SD settle after creating file
+      delay(50); //let SD settle after creating file
       Serial.println("✅ Created track.csv with header");
     } else {
       Serial.println("❌ Could not create track.csv");
@@ -260,7 +259,7 @@ bool initGNSS() {
   delay(500);
 
 #if GNSS_POWER_RESET_AT_BOOT
-  //NEW: power reset GNSS rail like RAK official code (helps when GNSS gets “stuck”)
+  //power reset GNSS rail like RAK official code (helps when GNSS gets “stuck”)
   pinMode(WB_IO2, OUTPUT);
   digitalWrite(WB_IO2, LOW);
   delay(1000);
@@ -341,7 +340,7 @@ GnssSnapshot getGnssSnapshot() {
 #if USE_GNSS
   if (!gnssOK) return snapshot;
 
-  unsigned long tWakeCmd = millis(); //NEW: start measuring awake time
+  unsigned long tWakeCmd = millis(); //start measuring awake time
   wakeGNSS();
 
   unsigned long start = millis();
@@ -396,11 +395,11 @@ GnssSnapshot getGnssSnapshot() {
 
 #if GNSS_KEEP_AWAKE_BETWEEN_CYCLES
   //do NOT sleep GNSS (test mode)
-  g_lastGnssAwakeMs = millis() - tWakeCmd; //NEW: awake so far (since wake command)
+  g_lastGnssAwakeMs = millis() - tWakeCmd; //awake so far (since wake command)
 #else
-  unsigned long tSleepCmd = millis(); //NEW
+  unsigned long tSleepCmd = millis(); 
   sleepGNSS();
-  g_lastGnssAwakeMs = tSleepCmd - tWakeCmd; //NEW: approx awake time until sleep command
+  g_lastGnssAwakeMs = tSleepCmd - tWakeCmd; //approx awake time until sleep command
 #endif
 
 #endif
@@ -502,16 +501,16 @@ void loop() {
     Serial.print(" speed_mps=");
     if (gSnapshot.surfaceFix) Serial.print(gSnapshot.speedMmps / 1000.0f, 3);
 
-    Serial.print(" awake_ms=");            //NEW
-    Serial.print(g_lastGnssAwakeMs);       //NEW
+    Serial.print(" awake_ms=");            //print GNSS awake time for this cycle
+    Serial.print(g_lastGnssAwakeMs);      
 #endif
     Serial.println();
 
     if (sdOK) {
       File file = SD.open(g_csvPath, FILE_WRITE);
-      if (!file) {                 //NEW: soft retry once (prevents false SD-down + extra RUN folders)
-        delay(50);                 //NEW
-        file = SD.open(g_csvPath, FILE_WRITE); //NEW
+      if (!file) {                 //soft retry once (prevents false SD-down + extra RUN folders)
+        delay(50);                 
+        file = SD.open(g_csvPath, FILE_WRITE); 
       }
 
       if (file) {
@@ -550,8 +549,8 @@ void loop() {
         file.close();
         Serial.println("✅ Logged 1 row to track.csv");
       } else {
-        Serial.println("❌ Could not open track.csv (will retry later)"); //NEW
-        //NEW: do NOT set sdOK=false on a single open failure (prevents re-init -> new RUN folder)
+        Serial.println("❌ Could not open track.csv (will retry later)"); //
+        //do NOT set sdOK=false on a single open failure (prevents re-init -> new RUN folder)
       }
     } else {
       Serial.println("⚠️ SD not available, skipping log");
